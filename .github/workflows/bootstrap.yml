@@ -1,0 +1,410 @@
+name: Bootstrap project (one-shot)
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Write bootstrap.py (generates the whole repo)
+        run: |
+          cat > bootstrap.py <<'PY'
+          import os, pathlib, textwrap
+          B = pathlib.Path(".")
+          def w(path, content):
+              p = B / path
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
+
+          w(".gitignore", "__pycache__/\n*.pyc\nstorage/wakefield.db\n.env\n")
+
+          w("requirements.txt", """
+          requests
+          beautifulsoup4
+          feedparser
+          pandas
+          pydantic
+          SQLAlchemy>=2.0
+          python-dateutil
+          pyyaml
+          python-dotenv
+          rich
+          """)
+
+          w("README.md", "# Wakefield Councillor Kit (iPhone-only, free)\nThis repo pulls council/WYCA meetings, consultations, TRO/PSPO, planning weekly list link, crime and flood alerts, then exports JSON into docs/ for a static dashboard served by GitHub Pages.\nUpdates run via GitHub Actions every 30 minutes.\n")
+
+          w("config/settings.yml", """
+          timezone: "Europe/London"
+          council_name: "City of Wakefield Metropolitan District Council"
+          wards_of_interest:
+            - "Wakefield East"
+            - "Wakefield North"
+            - "Wakefield South"
+            - "Wakefield West"
+            - "Ossett"
+            - "Horbury and South Ossett"
+            - "Castleford Central and Glasshoughton"
+            - "Pontefract North"
+            - "Pontefract South"
+            - "Normanton"
+            - "Featherstone"
+            - "Knottingley"
+            - "Altofts and Whitwood"
+            - "Hemsworth"
+            - "Crofton, Ryhill and Walton"
+            - "South Elmsall and South Kirkby"
+          crime_points:
+            wakefield_city_centre: {lat: 53.6833, lon: -1.4970}
+            pontefract: {lat: 53.6911, lon: -1.3110}
+            castleford: {lat: 53.7240, lon: -1.3550}
+          """)
+
+          w("utils/common.py", """
+          from pydantic import BaseModel
+          from pathlib import Path
+          import yaml
+          class Settings(BaseModel):
+              timezone: str = "Europe/London"
+              council_name: str
+              wards_of_interest: list[str]
+              crime_points: dict
+          def load_settings(path: str | Path) -> Settings:
+              with open(path,"r",encoding="utf-8") as f: data = yaml.safe_load(f)
+              return Settings(**data)
+          """)
+
+          w("storage/db.py", """
+          from sqlalchemy import create_engine, Integer, String, Text
+          from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+          from pathlib import Path
+          DB_PATH = Path(__file__).parent / "wakefield.db"
+          engine = create_engine(f"sqlite:///{DB_PATH}", future=True, echo=False)
+          class Base(DeclarativeBase): pass
+          class Meeting(Base):
+              __tablename__ = "meetings"
+              id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+              source: Mapped[str] = mapped_column(String(80))
+              committee: Mapped[str] = mapped_column(String(255))
+              title: Mapped[str] = mapped_column(String(500))
+              start_time: Mapped[str] = mapped_column(String(64))
+              location: Mapped[str] = mapped_column(String(255), default="")
+              url: Mapped[str] = mapped_column(Text)
+              published: Mapped[str] = mapped_column(String(64), default="")
+          class Consultation(Base):
+              __tablename__ = "consultations"
+              id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+              title: Mapped[str] = mapped_column(String(500))
+              closes: Mapped[str] = mapped_column(String(64), default="")
+              category: Mapped[str] = mapped_column(String(255), default="")
+              url: Mapped[str] = mapped_column(Text)
+              source: Mapped[str] = mapped_column(String(80))
+          class PlanningApplication(Base):
+              __tablename__ = "planning_applications"
+              id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+              reference: Mapped[str] = mapped_column(String(64))
+              address: Mapped[str] = mapped_column(String(500))
+              description: Mapped[str] = mapped_column(Text)
+              received_date: Mapped[str] = mapped_column(String(64), default="")
+              ward: Mapped[str] = mapped_column(String(255), default="")
+              status: Mapped[str] = mapped_column(String(100), default="")
+              url: Mapped[str] = mapped_column(Text)
+          class OrderNotice(Base):
+              __tablename__ = "orders_notices"
+              id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+              order_type: Mapped[str] = mapped_column(String(64))
+              title: Mapped[str] = mapped_column(String(500))
+              ward: Mapped[str] = mapped_column(String(255), default="")
+              url: Mapped[str] = mapped_column(Text)
+              open_date: Mapped[str] = mapped_column(String(64), default="")
+              close_date: Mapped[str] = mapped_column(String(64), default="")
+          class CrimeStat(Base):
+              __tablename__ = "crime_stats"
+              id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+              point_key: Mapped[str] = mapped_column(String(100))
+              category: Mapped[str] = mapped_column(String(100))
+              month: Mapped[str] = mapped_column(String(7))
+              count: Mapped[int] = mapped_column(Integer)
+          class FloodAlert(Base):
+              __tablename__ = "flood_alerts"
+              id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+              ta_code: Mapped[str] = mapped_column(String(32))
+              area_name: Mapped[str] = mapped_column(String(255))
+              severity: Mapped[str] = mapped_column(String(64))
+              message: Mapped[str] = mapped_column(Text)
+              timeRaised: Mapped[str] = mapped_column(String(64))
+          def get_session():
+              Base.metadata.create_all(engine)
+              return sessionmaker(engine, expire_on_commit=False)()
+          """)
+
+          w("connectors/modgov_wakefield.py", """
+          import feedparser, pandas as pd
+          BASE = "https://mg.wakefield.gov.uk/"
+          def whats_new(days=14) -> pd.DataFrame:
+              f = feedparser.parse(f"{BASE}mgWhatsNew.aspx?b={days}&RT=2")
+              rows=[]
+              for e in f.entries:
+                  rows.append({
+                      "source":"Wakefield ModernGov",
+                      "committee": (e.get("tags") or [{}])[0].get("term",""),
+                      "title": e.get("title",""),
+                      "start_time": e.get("published",""),
+                      "location": "",
+                      "url": e.get("link",""),
+                      "published": e.get("published",""),
+                  })
+              return pd.DataFrame(rows)
+          """)
+
+          w("connectors/modgov_wyca.py", """
+          import feedparser, pandas as pd
+          BASE = "https://westyorkshire.moderngov.co.uk/"
+          def whats_new(days=14) -> pd.DataFrame:
+              f = feedparser.parse(f"{BASE}mgWhatsNew.aspx?b={days}&RT=2")
+              rows=[]
+              for e in f.entries:
+                  rows.append({
+                      "source":"WYCA ModernGov",
+                      "committee": (e.get("tags") or [{}])[0].get("term",""),
+                      "title": e.get("title",""),
+                      "start_time": e.get("published",""),
+                      "location": "",
+                      "url": e.get("link",""),
+                      "published": e.get("published",""),
+                  })
+              return pd.DataFrame(rows)
+          """)
+
+          w("connectors/consultations.py", """
+          import requests, pandas as pd
+          from bs4 import BeautifulSoup
+          BASE = "https://www.wakefield.gov.uk"
+          CONSULT = BASE + "/about-the-council/consultation-and-engagement/wakefield-council-consultations"
+          TRO = BASE + "/about-the-council/consultation-and-engagement/wakefield-council-consultations/traffic-regulation-orders"
+          PSPO = BASE + "/anti-social-behaviour/public-space-protection-orders-pspos"
+          def _links(url):
+              r = requests.get(url, timeout=30); r.raise_for_status()
+              soup = BeautifulSoup(r.text, "html.parser")
+              rows=[]
+              for a in soup.select("a[href]"):
+                  t=a.get_text(strip=True); h=a["href"]
+                  if not t: continue
+                  if h.startswith("/"): h=BASE+h
+                  if h.startswith("http"): rows.append({"title":t,"url":h})
+              return rows
+          def consultations()->pd.DataFrame:
+              import pandas as pd
+              df=pd.DataFrame(_links(CONSULT))
+              if df.empty: return df
+              df["source"]="Wakefield Council"; df["category"]=""; df["closes"]=""
+              return df[["title","closes","category","url","source"]]
+          def traffic_reg_orders()->pd.DataFrame:
+              import pandas as pd
+              df=pd.DataFrame(_links(TRO))
+              if df.empty: return df
+              df["order_type"]="TRO"; df["ward"]=""; df["open_date"]=""; df["close_date"]=""
+              return df
+          def pspo()->pd.DataFrame:
+              import pandas as pd
+              df=pd.DataFrame(_links(PSPO))
+              if df.empty: return df
+              df["order_type"]="PSPO"; df["ward"]=""; df["open_date"]=""; df["close_date"]=""
+              return df
+          """)
+
+          w("connectors/planning_public_access.py", """
+          import requests, pandas as pd
+          BASE="https://planning.wakefield.gov.uk/online-applications/"
+          WEEKLY=BASE+"weeklyListResults.do?action=firstPage"
+          def search_recent(days_back:int=7)->pd.DataFrame:
+              r=requests.get(WEEKLY,timeout=30); r.raise_for_status()
+              return pd.DataFrame([{
+                "reference":"","address":"","description":"See weekly list for recent applications",
+                "received_date":"","ward":"","status":"","url":WEEKLY
+              }])
+          """)
+
+          w("connectors/police_api.py", """
+          import requests, pandas as pd
+          API="https://data.police.uk/api"
+          def monthly_crime_counts(lat:float, lon:float, months:list[str])->pd.DataFrame:
+              rows=[]
+              for m in months:
+                  r=requests.get(f"{API}/crimes-street/all-crime?lat={lat}&lng={lon}&date={m}",timeout=60)
+                  r.raise_for_status()
+                  tally={}
+                  for c in r.json():
+                      tally[c["category"]]=tally.get(c["category"],0)+1
+                  for cat,count in tally.items():
+                      rows.append({"category":cat,"month":m,"count":count})
+              return pd.DataFrame(rows)
+          """)
+
+          w("connectors/floods_api.py", """
+          import requests, pandas as pd
+          BASE="https://environment.data.gov.uk/flood-monitoring/alerts"
+          def active_alerts(area:str|None=None)->pd.DataFrame:
+              r=requests.get(BASE,timeout=30); r.raise_for_status()
+              js=r.json(); rows=[]
+              for it in js.get("items",[]):
+                  if area and area.lower() not in (it.get("area","")+it.get("description","")).lower(): continue
+                  rows.append({
+                      "ta_code":it.get("floodAreaID",""),
+                      "area_name":it.get("area",""),
+                      "severity":it.get("severity",""),
+                      "message":it.get("message",""),
+                      "timeRaised":it.get("timeRaised",""),
+                  })
+              return pd.DataFrame(rows)
+          """)
+
+          w("pipelines/orchestrator.py", """
+          from storage.db import get_session, Meeting, Consultation, PlanningApplication, OrderNotice, CrimeStat, FloodAlert
+          from connectors import modgov_wakefield as wf, modgov_wyca as wy, consultations as cons, planning_public_access as pa
+          from connectors import police_api as pol, floods_api as fld
+          from utils.common import load_settings
+          import pandas as pd
+          def save_df(df, model, s, m):
+              if df is None or df.empty: return 0
+              n=0
+              for _,r in df.iterrows():
+                  s.add(model(**{k:r.get(v,None) for k,v in m.items()})); n+=1
+              s.commit(); return n
+          def run_all(cfg="config/settings.yml")->dict:
+              s=get_session(); rep={}
+              rep["wf"]=save_df(wf.whats_new(14), Meeting, s, {"source":"source","committee":"committee","title":"title","start_time":"start_time","location":"location","url":"url","published":"published"})
+              rep["wy"]=save_df(wy.whats_new(14), Meeting, s, {"source":"source","committee":"committee","title":"title","start_time":"start_time","location":"location","url":"url","published":"published"})
+              c=cons.consultations(); rep["consult"]=save_df(c, Consultation, s, {"title":"title","closes":"closes","category":"category","url":"url","source":"source"})
+              tro=cons.traffic_reg_orders(); rep["tro"]=save_df(tro, OrderNotice, s, {"order_type":"order_type","title":"title","ward":"ward","url":"url","open_date":"open_date","close_date":"close_date"})
+              pspo=cons.pspo(); rep["pspo"]=save_df(pspo, OrderNotice, s, {"order_type":"order_type","title":"title","ward":"ward","url":"url","open_date":"open_date","close_date":"close_date"})
+              pl=pa.search_recent(7); rep["plan"]=save_df(pl, PlanningApplication, s, {"reference":"reference","address":"address","description":"description","received_date":"received_date","ward":"ward","status":"status","url":"url"})
+              months=[]; now=pd.Timestamp.utcnow()
+              for i in range(1,4): months.append((now - pd.DateOffset(months=i)).strftime("%Y-%m"))
+              total=0
+              for key,pt in load_settings(cfg).crime_points.items():
+                  df=pol.monthly_crime_counts(pt["lat"],pt["lon"],months)
+                  if not df.empty:
+                      df["point_key"]=key
+                      total+=save_df(df, CrimeStat, s, {"point_key":"point_key","category":"category","month":"month","count":"count"})
+              rep["crime"]=total
+              fl=fld.active_alerts("Wakefield"); rep["floods"]=save_df(fl, FloodAlert, s, {"ta_code":"ta_code","area_name":"area_name","severity":"severity","message":"message","timeRaised":"timeRaised"})
+              return rep
+          """)
+
+          w("app.py", "from pipelines.orchestrator import run_all\nfrom rich import print\nif __name__=='__main__': print(run_all())\n")
+
+          w("export/static_site.py", """
+          import json, time
+          from pathlib import Path
+          from storage.db import get_session, Meeting, Consultation, PlanningApplication, OrderNotice, CrimeStat, FloodAlert
+          out=Path("docs/data"); out.mkdir(parents=True, exist_ok=True)
+          s=get_session()
+          def dump(name, rows): (out/f"{name}.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+          dump("meetings", [{"when":r.start_time,"committee":r.committee,"title":r.title,"source":r.source,"url":r.url} for r in s.query(Meeting).order_by(Meeting.id.desc()).limit(200)])
+          dump("consultations", [{"title":r.title,"closes":r.closes,"url":r.url,"source":r.source} for r in s.query(Consultation).order_by(Consultation.id.desc()).limit(400)])
+          dump("orders", [{"type":r.order_type,"title":r.title,"ward":r.ward,"url":r.url} for r in s.query(OrderNotice).order_by(OrderNotice.id.desc()).limit(400)])
+          dump("planning", [{"ref":r.reference,"desc":r.description,"ward":r.ward,"url":r.url} for r in s.query(PlanningApplication).order_by(PlanningApplication.id.desc()).limit(200)])
+          dump("crime", [{"point":r.point_key,"month":r.month,"category":r.category,"count":r.count} for r in s.query(CrimeStat).order_by(CrimeStat.id.desc()).limit(2000)])
+          dump("floods", [{"area":r.area_name,"severity":r.severity,"message":r.message,"raised":r.timeRaised} for r in s.query(FloodAlert).order_by(FloodAlert.id.desc()).limit(200)])
+          Path("docs").mkdir(exist_ok=True)
+          Path("docs/meta.json").write_text(json.dumps({"last_updated_utc": time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime())}), encoding="utf-8")
+          """)
+
+          w("docs/index.html", """
+          <!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+          <title>Wakefield Councillor Dashboard</title><link rel="stylesheet" href="style.css"/></head><body>
+          <header><h1>Wakefield Councillor Dashboard</h1><div id="updated"></div></header>
+          <nav>
+            <button data-target="meetings">Meetings</button>
+            <button data-target="consultations">Consultations</button>
+            <button data-target="orders">TRO / PSPO</button>
+            <button data-target="planning">Planning</button>
+            <button data-target="crime">Crime</button>
+            <button data-target="floods">Floods</button>
+          </nav>
+          <main id="content"></main>
+          <footer><p>Free, phone-friendly, no hosting bill. Links go to official sources.</p></footer>
+          <script src="app.js"></script></body></html>
+          """)
+
+          w("docs/style.css", """
+          :root{--bg:#0f172a;--fg:#e2e8f0;--accent:#38bdf8;--muted:#94a3b8}
+          html,body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system}
+          header{padding:16px;border-bottom:1px solid #1f2937}
+          nav{display:flex;gap:8px;flex-wrap:wrap;padding:12px;border-bottom:1px solid #1f2937}
+          nav button{background:#111827;color:var(--fg);border:1px solid #334155;padding:8px 10px;border-radius:6px}
+          main{padding:12px}
+          .table{width:100%;border-collapse:collapse}
+          .table th,.table td{border-bottom:1px solid #1f2937;padding:8px}
+          a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+          @media (max-width:600px){.table th,.table td{font-size:14px}}
+          """)
+
+          w("docs/app.js", """
+          async function getJSON(p){const r=await fetch(p);return r.json()}
+          function el(t,a={},c=[]){const e=document.createElement(t);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));[].concat(c).forEach(x=>e.append(x.nodeType?x:document.createTextNode(x)));return e}
+          function table(h,rows){const t=el('table',{class:'table'}),th=el('thead'),tr=el('tr');h.forEach(x=>tr.append(el('th',{},x)));th.append(tr);t.append(th);const tb=el('tbody');rows.forEach(r=>{const tr=el('tr');r.forEach(cell=>tr.append(el('td',{},cell)));tb.append(tr)});t.append(tb);return t}
+          function link(href,txt){const a=el('a',{href,target:'_blank',rel:'noopener'});a.textContent=txt;return a}
+          const loaders={
+            async meetings(){const d=await getJSON('data/meetings.json');return table(['When','Committee','Title','Source'], d.map(x=>[x.when,x.committee,link(x.url,x.title),x.source]))},
+            async consultations(){const d=await getJSON('data/consultations.json');return table(['Title','Closes','Source'], d.map(x=>[link(x.url,x.title),x.closes||'—',x.source||'Wakefield Council']))},
+            async orders(){const d=await getJSON('data/orders.json');return table(['Type','Title','Ward'], d.map(x=>[x.type,link(x.url,x.title),x.ward||'']))},
+            async planning(){const d=await getJSON('data/planning.json');return table(['Ref','Description','Ward'], d.map(x=>[x.ref||'',link(x.url,x.desc),x.ward||'']))},
+            async crime(){const d=await getJSON('data/crime.json');return table(['Point','Month','Category','Count'], d.map(x=>[x.point,x.month,x.category,String(x.count)]))},
+            async floods(){const d=await getJSON('data/floods.json');return table(['Area','Severity','Message','Raised'], d.map(x=>[x.area,x.severity||'',x.message||'',x.raised||'']))},
+          };
+          async function load(s){const m=document.getElementById('content');m.innerHTML='Loading…';const v=await loaders[s]();m.innerHTML='';m.append(v)}
+          document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>load(b.dataset.target)));
+          (async()=>{try{const m=await getJSON('meta.json');document.getElementById('updated').textContent='Last update: '+m.last_updated_utc+' (UTC)';}catch{} load('meetings');})();
+          """)
+
+          w(".github/workflows/update.yml", """
+          name: Update data and publish dashboard
+          on:
+            schedule:
+              - cron: "*/30 * * * *"
+            workflow_dispatch:
+          permissions:
+            contents: write
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: "3.11"
+                - name: Install deps
+                  run: pip install -r requirements.txt
+                - name: Run pipeline
+                  run: python app.py
+                - name: Export static data
+                  run: python export/static_site.py
+                - name: Commit JSON
+                  run: |
+                    git config user.name "github-actions[bot]"
+                    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                    git add docs/data/*.json docs/meta.json
+                    git commit -m "Update dashboard data [skip ci]" || echo "No changes"
+                    git push
+          """)
+          print("Bootstrap files written.")
+          PY
+
+      - name: Run bootstrap
+        run: python bootstrap.py
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Bootstrap project" || echo "No changes"
+          git push
